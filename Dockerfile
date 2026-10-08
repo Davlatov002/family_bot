@@ -1,16 +1,18 @@
 FROM python:3.12-slim
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
 COPY requirements.txt .
-
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY . .
 
-WORKDIR /app/backend
+RUN mkdir -p /app/backend/media
 
-CMD ["sh", "-c", "python manage.py migrate && python -u -m bot.main"]
+# bot paketi /app ichida, Django esa /app/backend ichida
+CMD ["sh", "-c", "python backend/manage.py migrate --noinput && exec python -m bot.main"]

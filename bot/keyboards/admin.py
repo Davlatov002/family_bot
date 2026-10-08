@@ -157,7 +157,7 @@ def confirm_delete_birthday(birthday_id,):
                 ),
                 InlineKeyboardButton(
                     text="❌ Yo‘q",
-                    callback_data="birthday_list",
+                    callback_data="cancel_delete_birthday",
                 ),
             ]
         ]

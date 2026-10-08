@@ -1,4 +1,5 @@
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 *.sqlite3
@@ -8,9 +9,8 @@ __pycache__/
 .vscode/
 .idea/
 
+backend/media/
 media/
 staticfiles/
 
 *.log
-
-.git/

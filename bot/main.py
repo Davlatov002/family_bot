@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import logging
 from datetime import datetime
 from io import BytesIO
 from html import escape
@@ -35,7 +36,7 @@ django.setup()
 # IMPORTS
 # ==================================================
 
-from asgiref.sync import sync_to_async
+from bot.services.db import db_task
 from django.core.files.base import ContentFile
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -46,7 +47,7 @@ from aiogram.fsm.state import (State, StatesGroup,)
 from birthdays.models import Birthday
 from users.models import FamilyUser
 from bot.services.users import get_or_create_user
-from bot.services.birthday_notifications import (birthday_notification_loop, TASHKENT_TZ,)
+from bot.services.birthday_notifications import (birthday_notification_loop, TASHKENT_TZ, birthday_on, next_birthday,)
 from bot.keyboards.main import (user_menu, admin_menu, super_admin_menu, group_menu,)
 from bot.keyboards.admin import (super_admin_panel, admin_panel, confirm_add_admin, birthday_admin_panel, cancel_birthday, confirm_delete_birthday, relation_keyboard,)
 
@@ -58,7 +59,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN .env faylida topilmadi.")
 
-SUPER_ADMIN_ID = int(os.getenv( "SUPER_ADMIN_ID", "0",))
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("family_bot")
+
+try:
+    SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0"))
+except ValueError:
+    raise RuntimeError("SUPER_ADMIN_ID .env faylida raqam bo‘lishi kerak.")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
 
 # @username bo'lsa ham ishlaydi
@@ -89,7 +99,7 @@ class AddBirthdayState(StatesGroup):
 # PERMISSION
 # ==================================================
 
-@sync_to_async
+@db_task
 def get_user_role(telegram_id):
     user = FamilyUser.objects.filter(telegram_id=telegram_id, is_active=True,).first()
     if not user:
@@ -111,7 +121,7 @@ async def is_super_admin(telegram_id,):
 # USER DATABASE
 # ==================================================
 
-@sync_to_async
+@db_task
 def find_user_by_telegram_id(telegram_id,):
     user = FamilyUser.objects.filter(telegram_id=telegram_id, is_active=True,).first()
     if not user:
@@ -123,7 +133,7 @@ def find_user_by_telegram_id(telegram_id,):
         "role": user.role,
     }
 
-@sync_to_async
+@db_task
 def set_user_admin(user_id,):
     user = FamilyUser.objects.filter(id=user_id, is_active=True,).first()
     if not user:
@@ -134,7 +144,7 @@ def set_user_admin(user_id,):
     user.save(update_fields=["role"])
     return {"full_name": user.full_name, "telegram_id": user.telegram_id,}
 
-@sync_to_async
+@db_task
 def remove_admin_by_id(user_id,):
     user = FamilyUser.objects.filter(id=user_id, is_active=True, role="ADMIN",).first()
     if not user:
@@ -143,13 +153,13 @@ def remove_admin_by_id(user_id,):
     user.save(update_fields=["role"])
     return {"full_name": user.full_name, "telegram_id": user.telegram_id,}
 
-@sync_to_async
+@db_task
 def get_all_users():
     users = FamilyUser.objects.filter(is_active=True).order_by("id")
     return list(
         users.values("id", "full_name", "telegram_id", "phone", "role", "created_at",))
 
-@sync_to_async
+@db_task
 def get_admin_users():
     users = FamilyUser.objects.filter(is_active=True, role="ADMIN",).order_by("id")
     return list(
@@ -159,7 +169,7 @@ def get_admin_users():
 # STATISTICS
 # ==================================================
 
-@sync_to_async
+@db_task
 def get_statistics():
     total_users = FamilyUser.objects.filter(is_active=True).count()
     admins = FamilyUser.objects.filter(is_active=True, role="ADMIN",).count()
@@ -167,7 +177,7 @@ def get_statistics():
     normal_users = FamilyUser.objects.filter(is_active=True, role="USER",).count()
     total_birthdays = Birthday.objects.filter(is_active=True).count()
     today = datetime.now(TASHKENT_TZ).date()
-    today_birthdays = Birthday.objects.filter(is_active=True, birth_date__month=today.month, birth_date__day=today.day,).count()
+    today_birthdays = Birthday.objects.filter(birthday_on(today), is_active=True,).count()
     month_birthdays = Birthday.objects.filter(is_active=True, birth_date__month=today.month,).count()
     return {
         "total_users": total_users,
@@ -183,7 +193,7 @@ def get_statistics():
 # BIRTHDAY DATABASE
 # ==================================================
 
-@sync_to_async
+@db_task
 def get_month_birthdays():
     today = datetime.now(TASHKENT_TZ).date()
     birthdays = Birthday.objects.filter(is_active=True, birth_date__month=today.month,).order_by("birth_date__day")
@@ -198,15 +208,13 @@ def get_month_birthdays():
             })
     return result
 
-@sync_to_async
+@db_task
 def get_upcoming_birthdays():
     today = datetime.now(TASHKENT_TZ).date()
     birthdays = Birthday.objects.filter(is_active=True)
     result = []
     for birthday in birthdays:
-        birthday_this_year = birthday.birth_date.replace(year=today.year)
-        if birthday_this_year < today:
-            birthday_this_year = birthday.birth_date.replace(year=today.year + 1)
+        birthday_this_year = next_birthday(birthday.birth_date, today)
         days_left = (birthday_this_year - today).days
         if 0 <= days_left <= 7:
             result.append({
@@ -219,25 +227,25 @@ def get_upcoming_birthdays():
     result.sort(key=lambda x: x["days_left"])
     return result
 
-@sync_to_async
+@db_task
 def get_today_birthdays():
     today = datetime.now(TASHKENT_TZ).date()
-    birthdays = Birthday.objects.filter(is_active=True, birth_date__month=today.month, birth_date__day=today.day,)
+    birthdays = Birthday.objects.filter(birthday_on(today), is_active=True,)
     return list(birthdays.values("id", "full_name", "birth_date", "relation",))
 
-@sync_to_async
+@db_task
 def get_all_birthdays():
     birthdays = Birthday.objects.filter(is_active=True).order_by("birth_date__month", "birth_date__day",)
     return list(
         birthdays.values("id", "full_name", "birth_date", "relation",))
 
-@sync_to_async
+@db_task
 def create_birthday(full_name, birth_date, relation, photo_data,):
     birthday = Birthday.objects.create(full_name=full_name, birth_date=birth_date, relation=relation,)
     birthday.photo.save("birthday.jpg", ContentFile(photo_data), save=True,)
     return birthday.id
 
-@sync_to_async
+@db_task
 def delete_birthday(birthday_id,):
     birthday = Birthday.objects.filter(id=birthday_id, is_active=True,).first()
     if not birthday:
@@ -245,6 +253,24 @@ def delete_birthday(birthday_id,):
     birthday.is_active = False
     birthday.save(update_fields=["is_active"])
     return True
+
+# ==================================================
+# HELPERS
+# ==================================================
+
+TELEGRAM_TEXT_LIMIT = 4000
+
+async def answer_long(message: Message, text, **kwargs):
+    """Telegram 4096 belgidan uzun xabarni qabul qilmaydi — bo‘lib yuboramiz."""
+    chunk = ""
+    for block in text.split("\n\n"):
+        part = block + "\n\n"
+        if chunk and len(chunk) + len(part) > TELEGRAM_TEXT_LIMIT:
+            await message.answer(chunk.rstrip(), **kwargs)
+            chunk = ""
+        chunk += part
+    if chunk.strip():
+        await message.answer(chunk.rstrip(), **kwargs)
 
 # ==================================================
 # START
@@ -386,7 +412,7 @@ async def users_callback(callback: CallbackQuery,):
         if user["phone"]:
             text += (f"📱 {escape(user['phone'])}\n")
         text += "\n"
-    await callback.message.answer(text, parse_mode="HTML",)
+    await answer_long(callback.message, text, parse_mode="HTML")
     await callback.answer()
 
 # ==================================================
@@ -562,7 +588,7 @@ async def statistics_callback(callback: CallbackQuery,):
         f"🎂 Jami: <b>{stats['total_birthdays']}</b>\n"
         f"🎉 Bugun: <b>{stats['today_birthdays']}</b>\n"
         f"📅 Shu oy: <b>{stats['month_birthdays']}</b>")
-    await callback.message.answer(text, parse_mode="HTML",)
+    await answer_long(callback.message, text, parse_mode="HTML")
     await callback.answer()
 
 # ==================================================
@@ -695,8 +721,8 @@ async def birthday_photo(message: Message, state: FSMContext,):
         await bot.download_file(telegram_file.file_path, destination=photo_bytes,)
         photo_bytes.seek(0)
         birthday_id = await create_birthday(full_name=full_name, birth_date=birth_date, relation=relation, photo_data=photo_bytes.read(),)
-    except Exception as e:
-        print("❌ Tug‘ilgan kun saqlash xatosi:", e,)
+    except Exception:
+        logger.exception("❌ Tug‘ilgan kun saqlash xatosi")
         await message.answer("❌ Rasmni saqlashda xatolik yuz berdi. Qaytadan urinib ko‘ring.")
         return
     await state.clear()
@@ -770,7 +796,7 @@ async def today_birthdays_callback(callback: CallbackQuery,):
         text += (
             f"🎂 <b>{safe_name}</b>\n"
             f"👨‍👩‍👦 {safe_relation}\n\n")
-    await callback.message.answer(text, parse_mode="HTML",)
+    await answer_long(callback.message, text, parse_mode="HTML")
     await callback.answer()
 
 # ==================================================
@@ -796,7 +822,7 @@ async def month_birthdays_callback(callback: CallbackQuery,):
             f"🎂 <b>{safe_name}</b>\n"
             f"📅 {birthday['date']}\n"
             f"👨‍👩‍👦 {safe_relation}\n\n")
-    await callback.message.answer(text, parse_mode="HTML",)
+    await answer_long(callback.message, text, parse_mode="HTML")
     await callback.answer()
 
 # ==================================================
@@ -821,6 +847,11 @@ async def delete_birthday_callback(callback: CallbackQuery,):
         await callback.answer("❌ Tug‘ilgan kun topilmadi.", show_alert=True,)
 
 
+@dp.callback_query(F.data == "cancel_delete_birthday")
+async def cancel_delete_birthday_callback(callback: CallbackQuery,):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Bekor qilindi")
+
 # ==================================================
 # GROUP - THIS MONTH
 # ==================================================
@@ -838,8 +869,8 @@ async def group_month_birthdays(callback: CallbackQuery,):
         safe_name = escape(birthday["full_name"])
         text += (
             f"🎂 <b>{safe_name}</b>\n"
-            f"📅 {birthday['date']}\n")
-    await callback.message.answer(text, parse_mode="HTML",)
+            f"📅 {birthday['date']}\n\n")
+    await answer_long(callback.message, text, parse_mode="HTML")
 
 # ==================================================
 # GROUP - UPCOMING
@@ -865,7 +896,7 @@ async def group_upcoming_birthdays(callback: CallbackQuery,):
             f"🎂 <b>{safe_name}</b>\n"
             f"📅 {birthday['date']}\n"
             f"{left}\n\n")
-    await callback.message.answer(text, parse_mode="HTML",)
+    await answer_long(callback.message, text, parse_mode="HTML")
 
 
 # ==================================================
@@ -881,8 +912,8 @@ async def month_birthdays_handler(message: Message,):
     text = ("📅 <b>SHU OYDA TUG‘ILGAN KUNLAR</b>\n\n")
     for birthday in birthdays:
         safe_name = escape(birthday["full_name"])
-        text += (f"🎂 <b>{safe_name}</b> — {birthday['date']}\n")
-    await message.answer(text, parse_mode="HTML",)
+        text += (f"🎂 <b>{safe_name}</b> — {birthday['date']}\n\n")
+    await answer_long(message, text, parse_mode="HTML")
 
 
 # ==================================================
@@ -908,7 +939,7 @@ async def upcoming_birthdays_handler(message: Message,):
             f"🎂 <b>{safe_name}</b>\n"
             f"📅 {birthday['date']}\n"
             f"{left}\n\n")
-    await message.answer(text, parse_mode="HTML",)
+    await answer_long(message, text, parse_mode="HTML")
 
 
 # ==================================================
@@ -955,17 +986,20 @@ async def group_all_birthdays(callback: CallbackQuery):
             f"🎂 <b>{safe_name}</b>\n"
             f"📅 {birthday['birth_date'].strftime('%d.%m.%Y')}\n\n"
         )
-    await callback.message.answer(text, parse_mode="HTML")
+    await answer_long(callback.message, text, parse_mode="HTML")
 
 # ==================================================
 # MAIN
 # ==================================================
 
 async def main():
-    print("==================================")
-    print("🤖 Bot ishga tushmoqda...")
-    print("🎂 Birthday scheduler ishga tushmoqda...")
-    print("==================================")
+    global BOT_USERNAME
+    logger.info("🤖 Bot ishga tushmoqda...")
+    if not BOT_USERNAME:
+        me = await bot.get_me()
+        BOT_USERNAME = me.username
+    logger.info("🤖 Bot: @%s", BOT_USERNAME)
+    logger.info("🎂 Birthday scheduler ishga tushmoqda...")
     scheduler_task = asyncio.create_task(birthday_notification_loop(bot))
     try:
         await dp.start_polling(bot)
